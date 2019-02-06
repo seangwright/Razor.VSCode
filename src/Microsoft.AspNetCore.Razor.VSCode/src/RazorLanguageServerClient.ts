@@ -10,6 +10,7 @@ import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
+    ResolveCompletionItemSignature,
 } from 'vscode-languageclient/lib/main';
 import { RazorLanguageServerOptions } from './RazorLanguageServerOptions';
 import { RazorLogger } from './RazorLogger';
@@ -38,6 +39,16 @@ export class RazorLanguageServerClient implements vscode.Disposable {
         this.isStarted = false;
         this.clientOptions = {
             outputChannel: options.outputChannel,
+            // middleware: {
+            //     provideCompletionItem: (
+            //         document: vscode.TextDocument, position: vscode.Position, context: vscode.CompletionContext,
+            //         token: vscode.CancellationToken) => {
+            //             return [];
+            //         },
+            //     resolveCompletionItem: (item: vscode.CompletionItem, token: vscode.CancellationToken, next: ResolveCompletionItemSignature) => {
+            //         return item;
+            //     },
+            // },
         };
 
         const args: string[] = [];
