@@ -10,7 +10,5 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
     internal abstract class TagHelperCompletionService
     {
         public abstract IReadOnlyList<CompletionItem> GetCompletionsAt(SourceSpan location, RazorCodeDocument codeDocument);
-
-        public abstract bool TryGetDocumentation(CompletionItem completionItem, out StringOrMarkupContent body);
     }
 }

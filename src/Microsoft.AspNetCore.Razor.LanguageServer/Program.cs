@@ -80,9 +80,8 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                         services.AddSingleton<TagHelperFactsService, DefaultTagHelperFactsService>();
                         services.AddSingleton<VisualStudio.Editor.Razor.TagHelperCompletionService, VisualStudio.Editor.Razor.DefaultTagHelperCompletionService>();
                         services.AddSingleton<TagHelperCompletionService, DefaultTagHelperCompletionService>();
+                        services.AddSingleton<TagHelperDescriptionFactory, DefaultTagHelperDescriptionFactory>();
 
-                        var tagHelperLookupService = new DefaultTagHelperLookupService();
-                        services.AddSingleton<TagHelperLookupService>(tagHelperLookupService);
                         var foregroundDispatcher = new VSCodeForegroundDispatcher();
                         services.AddSingleton<ForegroundDispatcher>(foregroundDispatcher);
                         services.AddSingleton<RazorCompletionFactsService, DefaultRazorCompletionFactsService>();
@@ -95,7 +94,6 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                         services.AddSingleton<GeneratedCodeContainerStore>(containerStore);
 
                         services.AddSingleton<ProjectSnapshotChangeTrigger>(documentVersionCache);
-                        services.AddSingleton<ProjectSnapshotChangeTrigger>(tagHelperLookupService);
                         services.AddSingleton<ProjectSnapshotChangeTrigger, BackgroundDocumentGenerator>();
                         services.AddSingleton<ProjectSnapshotChangeTrigger>(containerStore);
                     }));

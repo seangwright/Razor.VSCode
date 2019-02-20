@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -18,9 +19,8 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
 {
     internal class DefaultTagHelperCompletionService : TagHelperCompletionService
     {
-        private static readonly Lazy<Regex> ExtractCrefRegex = new Lazy<Regex>(
-            () => new Regex("<(see|seealso)[\\s]+cref=\"([^\">]+)\"[^>]*>", RegexOptions.Compiled, TimeSpan.FromSeconds(1)));
-        private const string AssociatedTagHelpersKey = "_TagHelpers_";
+        private static readonly Container<string> AttributeCommitCharacters = new Container<string>("=", " ");
+        private static readonly Container<string> ElementCommitCharacters = new Container<string>(" ");
         private static readonly HashSet<string> HtmlSchemaTagNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "DOCTYPE",
@@ -148,24 +148,24 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             "wbr",
         };
         private readonly RazorTagHelperCompletionService _razorTagHelperCompletionService;
-        private readonly TagHelperLookupService _tagHelperLookupService;
+        private readonly TagHelperDescriptionFactory _descriptionFactory;
 
         public DefaultTagHelperCompletionService(
             RazorTagHelperCompletionService razorCompletionService,
-            TagHelperLookupService tagHelperLookupService)
+            TagHelperDescriptionFactory descriptionFactory)
         {
             if (razorCompletionService == null)
             {
                 throw new ArgumentNullException(nameof(razorCompletionService));
             }
 
-            if (tagHelperLookupService == null)
+            if (descriptionFactory == null)
             {
-                throw new ArgumentNullException(nameof(tagHelperLookupService));
+                throw new ArgumentNullException(nameof(descriptionFactory));
             }
 
             _razorTagHelperCompletionService = razorCompletionService;
-            _tagHelperLookupService = tagHelperLookupService;
+            _descriptionFactory = descriptionFactory;
         }
 
         public override IReadOnlyList<CompletionItem> GetCompletionsAt(SourceSpan location, RazorCodeDocument codeDocument)
@@ -178,256 +178,204 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             var syntaxTree = codeDocument.GetSyntaxTree();
             var change = new SourceChange(location, "");
             var owner = syntaxTree.Root.LocateOwner(change);
-            var parent = owner.Parent;
 
-            if (parent is MarkupStartTagSyntax startTag)
+            if (owner == null)
             {
-                // Performing completion on an Html start tag name
-
-                var containingTagName = startTag.Name.Content;
-                var attributes = StringifyAttributes(startTag.Attributes);
-                var ancestors = parent.Ancestors();
-                var tagHelperDocumentContext = codeDocument.GetTagHelperContext();
-                var (ancestorTagName, ancestorIsTagHelper) = GetNearestAncestorTagInfo(ancestors);
-                var elementCompletionContext = new ElementCompletionContext(
-                    tagHelperDocumentContext,
-                    existingCompletions: Enumerable.Empty<string>(),
-                    containingTagName,
-                    attributes,
-                    ancestorTagName,
-                    ancestorIsTagHelper,
-                    HtmlSchemaTagNames.Contains);
-
-                var completionItems = new List<CompletionItem>();
-                var completionResult = _razorTagHelperCompletionService.GetElementCompletions(elementCompletionContext);
-                foreach (var completion in completionResult.Completions)
-                {
-                    var data = new JObject();
-                    var tagHelperTypeNames = completion.Value.Select(tagHelper => tagHelper.GetTypeName()).ToArray();
-                    data[AssociatedTagHelpersKey] = new JArray(tagHelperTypeNames);
-                    var razorCompletionItem = new CompletionItem()
-                    {
-                        Label = completion.Key,
-                        InsertText = completion.Key,
-                        FilterText = completion.Key,
-                        SortText = completion.Key,
-                        Kind = CompletionItemKind.TypeParameter,
-                        Data = data,
-                    };
-
-                    completionItems.Add(razorCompletionItem);
-                }
-
-                return completionItems;
-            }
-            else if (parent is MarkupTagHelperStartTagSyntax startTagHelper)
-            {
-                // Performing completion on a TagHelper start tag name
-
-                var containingTagName = startTagHelper.Name.Content;
-                var attributes = StringifyAttributes(startTagHelper.Attributes);
-                var ancestors = parent.Ancestors();
-                var tagHelperDocumentContext = codeDocument.GetTagHelperContext();
-                var (ancestorTagName, ancestorIsTagHelper) = GetNearestAncestorTagInfo(ancestors);
-            }
-            else
-            {
-                // Invalid location for TagHelper completions.
+                Debug.Fail("Owner should never be null.");
                 return Array.Empty<CompletionItem>();
             }
 
-            var parentKind = parent.Kind;
-            if (parentKind == SyntaxKind.MarkupStartTag || parentKind == SyntaxKind.MarkupTagHelperStartTag)
+            var parent = owner.Parent;
+            if (TryGetElementInfo(parent, out var containingTagNameToken, out var attributes) &&
+                containingTagNameToken.Span.IntersectsWith(location.AbsoluteIndex))
             {
-
+                var stringifiedAttributes = StringifyAttributes(attributes);
+                var elementCompletions = GetElementCompletions(parent, containingTagNameToken.Content, stringifiedAttributes, codeDocument);
+                return elementCompletions;
             }
 
+            if (TryGetAttributeInfo(parent, out containingTagNameToken, out var selectedAttributeName, out attributes) && 
+                attributes.Span.IntersectsWith(location.AbsoluteIndex))
+            {
+                var stringifiedAttributes = StringifyAttributes(attributes);
+                var attributeCompletions = GetAttributeCompletions(parent, containingTagNameToken.Content, selectedAttributeName, stringifiedAttributes, codeDocument);
+                return attributeCompletions;
+            }
+
+            // Invalid location for TagHelper completions.
             return Array.Empty<CompletionItem>();
         }
 
-        public override bool TryGetDocumentation(CompletionItem completionItem, out StringOrMarkupContent body)
+        private static bool TryGetElementInfo(SyntaxNode element, out SyntaxToken containingTagNameToken, out SyntaxList<RazorSyntaxNode> attributeNodes)
         {
-            const string summaryStartTag = "<summary>";
-            const string summaryEndTag = "</summary>";
-
-            if (completionItem.Data is JObject data && data.TryGetValue(AssociatedTagHelpersKey, out var entry))
+            if (element is MarkupStartTagSyntax startTag)
             {
-                var associatedTagHelperTypes = entry as JArray;
-
-                if (associatedTagHelperTypes.Count == 0)
-                {
-                    body = null;
-                    return false;
-                }
-
-                var documentationBuilder = new StringBuilder();
-                for (var i = 0; i < associatedTagHelperTypes.Count; i++)
-                {
-                    var tagHelperType = associatedTagHelperTypes[i].ToString();
-
-                    if (documentationBuilder.Length > 0)
-                    {
-                        documentationBuilder.AppendLine();
-                        documentationBuilder.AppendLine("---");
-                    }
-
-                    documentationBuilder.Append("**");
-                    var lastSeparator = tagHelperType.LastIndexOf('.');
-                    var reducedTypeName = ExtractDocumentationTypePiece(tagHelperType, tagHelperType.Length - 1);
-                    documentationBuilder.Append(reducedTypeName);
-                    documentationBuilder.AppendLine("**");
-                    documentationBuilder.AppendLine();
-
-
-                    if (_tagHelperLookupService.TryFindByTypeName(tagHelperType, out var tagHelper) &&
-                        tagHelper.Documentation != null)
-                    {
-                        var summaryTagStart = tagHelper.Documentation.IndexOf(summaryStartTag, StringComparison.OrdinalIgnoreCase);
-                        if (summaryTagStart == -1)
-                        {
-                            body = null;
-                            return false;
-                        }
-
-                        var summaryTagEndStart = tagHelper.Documentation.IndexOf(summaryEndTag, StringComparison.OrdinalIgnoreCase);
-                        if (summaryTagEndStart == -1)
-                        {
-                            body = null;
-                            return false;
-                        }
-
-                        var summaryContentStart = summaryTagStart + summaryStartTag.Length;
-                        var summaryContentLength = summaryTagEndStart - summaryContentStart;
-                        var summaryContent = tagHelper.Documentation.Substring(summaryContentStart, summaryContentLength);
-                        var crefMatches = ExtractCrefRegex.Value.Matches(summaryContent).Reverse();
-                        var summaryBuilder = new StringBuilder(summaryContent);
-
-                        foreach (var cref in crefMatches)
-                        {
-                            if (cref.Success)
-                            {
-                                var value = cref.Groups[2].Value;
-                                var reducedValue = ReduceCrefValue(value);
-                                summaryBuilder.Remove(cref.Index, cref.Length);
-                                summaryBuilder.Insert(cref.Index, $"`{reducedValue}`");
-                            }
-
-                        }
-                        var lines = summaryBuilder.ToString().Split(new[] { '\n' }, StringSplitOptions.None).Select(line => line.Trim());
-                        var finalSummaryContent = string.Join(Environment.NewLine, lines);
-                        documentationBuilder.AppendLine(finalSummaryContent);
-                    }
-                }
-
-                body = new StringOrMarkupContent(
-                    new MarkupContent()
-                    {
-                        Kind = MarkupKind.Markdown,
-                        Value = documentationBuilder.ToString(),
-                    });
+                containingTagNameToken = startTag.Name;
+                attributeNodes = startTag.Attributes;
                 return true;
             }
 
-            body = null;
+            if (element is MarkupTagHelperStartTagSyntax startTagHelper)
+            {
+                containingTagNameToken = startTagHelper.Name;
+                attributeNodes = startTagHelper.Attributes;
+                return true;
+            }
+
+            containingTagNameToken = null;
+            attributeNodes = default;
             return false;
         }
 
-        /// <summary>
-        /// </summary>
-        /// <param name="value"></param>
-        /// <returns></returns>
-        private static string ReduceCrefValue(string value)
+        private static bool TryGetAttributeInfo(SyntaxNode attribute, out SyntaxToken containingTagNameToken, out string selectedAttributeName, out SyntaxList<RazorSyntaxNode> attributeNodes)
         {
-            if (value.Length < 2)
+            if ((attribute is MarkupMiscAttributeContentSyntax || 
+                attribute is MarkupMinimizedAttributeBlockSyntax || 
+                attribute is MarkupAttributeBlockSyntax || 
+                attribute is MarkupTagHelperAttributeSyntax || 
+                attribute is MarkupMinimizedTagHelperAttributeSyntax) &&
+                TryGetElementInfo(attribute.Parent, out containingTagNameToken, out attributeNodes))
             {
-                return string.Empty;
+                selectedAttributeName = null;
+                return true;
             }
 
-            var type = value[0];
-            value = value.Substring(2);
-
-            switch (type)
-            {
-                case 'T':
-                    var reducedCrefType = ExtractDocumentationTypePiece(value, value.Length - 1);
-                    return reducedCrefType;
-                case 'P':
-                case 'M':
-                    var reducedProperty = ExtractDocumentationTypePiece(value, value.Length - 1);
-                    var reducedType = ExtractDocumentationTypePiece(value, value.Length - reducedProperty.Length - 2 /* X. */);
-                    var reducedCrefProperty = string.Concat(reducedType, ".", reducedProperty);
-                    return reducedCrefProperty;
-            }
-
-            return value;
+            containingTagNameToken = null;
+            selectedAttributeName = null;
+            attributeNodes = default;
+            return false;
         }
 
-        private static string ExtractDocumentationTypePiece(string content, int reverseIndexStart)
+        private IReadOnlyList<CompletionItem> GetAttributeCompletions(
+            SyntaxNode containingAttribute,
+            string containingTagName,
+            string selectedAttributeName,
+            IEnumerable<KeyValuePair<string, string>> attributes,
+            RazorCodeDocument codeDocument)
         {
-            int scope = 0;
-            for (var i = reverseIndexStart; i >= 0; i--)
+            var ancestors = containingAttribute.Parent.Ancestors();
+            var tagHelperDocumentContext = codeDocument.GetTagHelperContext();
+            var (ancestorTagName, ancestorIsTagHelper) = GetNearestAncestorTagInfo(ancestors);
+            var elementCompletionContext = new AttributeCompletionContext(
+                tagHelperDocumentContext,
+                existingCompletions: Enumerable.Empty<string>(),
+                containingTagName,
+                selectedAttributeName,
+                attributes,
+                ancestorTagName,
+                ancestorIsTagHelper,
+                HtmlSchemaTagNames.Contains);
+
+            var completionItems = new List<CompletionItem>();
+            var completionResult = _razorTagHelperCompletionService.GetAttributeCompletions(elementCompletionContext);
+            foreach (var completion in completionResult.Completions)
             {
-                do
+                var filterText = completion.Key;
+                var indexerCompletion = filterText.EndsWith("...");
+                if (indexerCompletion)
                 {
-                    if (content[i] == '}')
-                    {
-                        scope++;
-                    }
-                    else if (content[i] == '{')
-                    {
-                        scope--;
-                    }
-
-                    if (scope > 0)
-                    {
-                        i--;
-                    }
-                } while (scope != 0 && i >= 0);
-
-                if (i < 0)
-                {
-                    // Could not balance scope
-                    return content.Substring(0, reverseIndexStart);
+                    filterText = filterText.Substring(0, filterText.Length - 3);
                 }
 
-                do
+                var insertTextFormat = InsertTextFormat.Snippet;
+                if (!TryResolveAttributeInsertionSnippet(filterText, completion.Value, indexerCompletion, out var insertText))
                 {
-                    if (content[i] == ')')
-                    {
-                        scope++;
-                    }
-                    else if (content[i] == '{')
-                    {
-                        scope--;
-                    }
-
-                    if (scope > 0)
-                    {
-                        i--;
-                    }
-                } while (scope != 0 && i >= 0);
-
-                if (i < 0)
-                {
-                    // Could not balance scope
-                    return content.Substring(0, reverseIndexStart);
+                    insertTextFormat = InsertTextFormat.PlainText;
+                    insertText = filterText;
                 }
 
-                if (content[i] == '.')
+                var razorCompletionItem = new CompletionItem()
                 {
-                    var piece = content.Substring(i + 1, reverseIndexStart - i);
-                    return piece;
-                }
+                    Label = completion.Key,
+                    InsertText = insertText,
+                    InsertTextFormat = insertTextFormat,
+                    FilterText = filterText,
+                    SortText = filterText,
+                    Kind = CompletionItemKind.TypeParameter,
+                    CommitCharacters = AttributeCommitCharacters,
+                };
+                var attributeDescriptionInfos = completion.Value.Select(boundAttribute => new AttributeDescriptionInfo(
+                    boundAttribute.DisplayName,
+                    boundAttribute.GetPropertyName(),
+                    indexerCompletion? boundAttribute.IndexerTypeName : boundAttribute.TypeName,
+                    boundAttribute.Documentation));
+                razorCompletionItem.SetDescriptionData(attributeDescriptionInfos);
+
+                completionItems.Add(razorCompletionItem);
             }
 
-            return content.Substring(0, reverseIndexStart);
+            return completionItems;
+        }
+
+        private IReadOnlyList<CompletionItem> GetElementCompletions(
+            SyntaxNode containingTag,
+            string containingTagName,
+            IEnumerable<KeyValuePair<string, string>> attributes,
+            RazorCodeDocument codeDocument)
+        {
+            var ancestors = containingTag.Ancestors();
+            var tagHelperDocumentContext = codeDocument.GetTagHelperContext();
+            var (ancestorTagName, ancestorIsTagHelper) = GetNearestAncestorTagInfo(ancestors);
+            var elementCompletionContext = new ElementCompletionContext(
+                tagHelperDocumentContext,
+                existingCompletions: Enumerable.Empty<string>(),
+                containingTagName,
+                attributes,
+                ancestorTagName,
+                ancestorIsTagHelper,
+                HtmlSchemaTagNames.Contains);
+
+            var completionItems = new List<CompletionItem>();
+            var completionResult = _razorTagHelperCompletionService.GetElementCompletions(elementCompletionContext);
+            foreach (var completion in completionResult.Completions)
+            {
+                var razorCompletionItem = new CompletionItem()
+                {
+                    Label = completion.Key,
+                    InsertText = completion.Key,
+                    FilterText = completion.Key,
+                    SortText = completion.Key,
+                    Kind = CompletionItemKind.TypeParameter,
+                    CommitCharacters = ElementCommitCharacters,
+                };
+                razorCompletionItem.SetDescriptionData(completion.Value);
+
+                completionItems.Add(razorCompletionItem);
+            }
+
+            return completionItems;
         }
 
         private static IEnumerable<KeyValuePair<string, string>> StringifyAttributes(SyntaxList<RazorSyntaxNode> attributes)
         {
             var stringifiedAttributes = new List<KeyValuePair<string, string>>();
 
-            // TODO FIX ATTRIBUTES
+            for (var i = 0; i < attributes.Count; i++)
+            {
+                var attribute = attributes[i];
+                if (attribute is MarkupTagHelperAttributeSyntax tagHelperAttribute)
+                {
+                    var name = tagHelperAttribute.Name.GetContent();
+                    var value = tagHelperAttribute.Value.GetContent();
+                    stringifiedAttributes.Add(new KeyValuePair<string, string>(name, value));
+                }
+                else if (attribute is MarkupMinimizedTagHelperAttributeSyntax minimizedTagHelperAttribute)
+                {
+                    var name = minimizedTagHelperAttribute.Name.GetContent();
+                    stringifiedAttributes.Add(new KeyValuePair<string, string>(name, string.Empty));
+                }
+                else if (attribute is MarkupAttributeBlockSyntax markupAttribute)
+                {
+                    var name = markupAttribute.Name.GetContent();
+                    var value = markupAttribute.Value.GetContent();
+                    stringifiedAttributes.Add(new KeyValuePair<string, string>(name, value));
+                }
+                else if (attribute is MarkupMinimizedAttributeBlockSyntax minimizedMarkupAttribute)
+                {
+                    var name = minimizedMarkupAttribute.Name.GetContent();
+                    stringifiedAttributes.Add(new KeyValuePair<string, string>(name, string.Empty));
+                }
+            }
 
             return stringifiedAttributes;
         }
@@ -447,6 +395,33 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             }
 
             return (ancestorTagName: null, ancestorIsTagHelper: false);
+        }
+
+        private bool TryResolveAttributeInsertionSnippet(
+            string text,
+            IEnumerable<BoundAttributeDescriptor> boundAttributes,
+            bool indexerCompletion,
+            out string snippetText)
+        {
+            const string BoolTypeName = "System.Boolean";
+
+            // Boolean returning bound attribute, auto-complete to just the attribute name.
+            if (indexerCompletion)
+            {
+                if (boundAttributes.All(boundAttribute => boundAttribute.IndexerTypeName == BoolTypeName))
+                {
+                    snippetText = null;
+                    return false;
+                }
+            }
+            else if (boundAttributes.All(boundAttribute => boundAttribute.TypeName == BoolTypeName))
+            {
+                snippetText = null;
+                return false;
+            }
+
+            snippetText = string.Concat(text, "=\"$1\"");
+            return true;
         }
     }
 }

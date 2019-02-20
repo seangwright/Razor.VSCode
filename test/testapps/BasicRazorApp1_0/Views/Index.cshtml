@@ -1,12 +1,14 @@
-﻿@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+﻿@model DateTime
+
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
 @addTagHelper *, BasicRazorApp1_0
 
 @{
     var message = "Hello";
 }
 
-<h1>@(message)</h1>
+<h1 class="hello">@(message)</h1>
 
-@
+<input asp-for="Month">
 
 

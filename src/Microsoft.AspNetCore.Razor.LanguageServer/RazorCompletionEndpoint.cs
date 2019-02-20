@@ -33,12 +33,14 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
         private readonly DocumentResolver _documentResolver;
         private readonly RazorCompletionFactsService _completionFactsService;
         private readonly TagHelperCompletionService _tagHelperCompletionService;
+        private readonly TagHelperDescriptionFactory _tagHelperDescriptionFactory;
 
         public RazorCompletionEndpoint(
             ForegroundDispatcher foregroundDispatcher,
             DocumentResolver documentResolver,
             RazorCompletionFactsService completionFactsService,
             TagHelperCompletionService tagHelperCompletionService,
+            TagHelperDescriptionFactory tagHelperDescriptionFactory,
             ILoggerFactory loggerFactory)
         {
             if (foregroundDispatcher == null)
@@ -61,6 +63,11 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                 throw new ArgumentNullException(nameof(tagHelperCompletionService));
             }
 
+            if (tagHelperDescriptionFactory == null)
+            {
+                throw new ArgumentNullException(nameof(tagHelperDescriptionFactory));
+            }
+
             if (loggerFactory == null)
             {
                 throw new ArgumentNullException(nameof(loggerFactory));
@@ -70,6 +77,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             _documentResolver = documentResolver;
             _completionFactsService = completionFactsService;
             _tagHelperCompletionService = tagHelperCompletionService;
+            _tagHelperDescriptionFactory = tagHelperDescriptionFactory;
             _logger = loggerFactory.CreateLogger<RazorCompletionEndpoint>();
         }
 
@@ -123,7 +131,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                     Detail = razorCompletionItem.Description,
                     Documentation = razorCompletionItem.Description,
                     FilterText = razorCompletionItem.DisplayText,
-                    SortText = razorCompletionItem.DisplayText,
+                    SortText = "__Razor__" + razorCompletionItem.DisplayText,
                     Kind = CompletionItemKind.Struct,
                 };
 
@@ -159,7 +167,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             {
                 DocumentSelector = RazorDefaults.Selector,
                 ResolveProvider = true,
-                TriggerCharacters = new Container<string>("@", "<", " "),
+                TriggerCharacters = new Container<string>("@", "<"),
             };
         }
 
@@ -175,10 +183,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
 
         public Task<CompletionItem> Handle(CompletionItem completionItem, CancellationToken cancellationToken)
         {
-            if (_tagHelperCompletionService.TryGetDocumentation(completionItem, out var body))
-            {
-                completionItem.Documentation = body;
-            }
+            _tagHelperDescriptionFactory.TryPopulateDescription(completionItem);
 
             return Task.FromResult(completionItem);
         }
