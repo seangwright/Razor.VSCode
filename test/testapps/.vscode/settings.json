@@ -1,3 +1,5 @@
 {
-    "razor.devmode": true
+    "razor.devmode": true,
+    "razor.plugin.path": "C:/GitHub/Razor.VSCode/src/Microsoft.AspNetCore.Razor.OmniSharpPlugin/bin/Debug/net461/Microsoft.AspNetCore.Razor.OmniSharpPlugin.dll",
+    "omnisharp.path": "1.32.9-beta.56"
 }

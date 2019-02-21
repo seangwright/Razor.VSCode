@@ -11,13 +11,14 @@ using Microsoft.AspNetCore.Razor.LanguageServer.ProjectSystem;
 using Microsoft.CodeAnalysis.Razor;
 using Microsoft.CodeAnalysis.Text;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
 using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using OmniSharp.Extensions.LanguageServer.Protocol.Server;
 
 namespace Microsoft.AspNetCore.Razor.LanguageServer
 {
-    internal class RazorCompletionEndpoint : ICompletionHandler
+    internal class RazorCompletionEndpoint : ICompletionHandler, ICompletionResolveHandler
     {
         private CompletionCapability _capability;
         private readonly ILogger _logger;
@@ -25,12 +26,14 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
         private readonly DocumentResolver _documentResolver;
         private readonly RazorCompletionFactsService _completionFactsService;
         private readonly TagHelperCompletionService _tagHelperCompletionService;
+        private readonly TagHelperDescriptionFactory _tagHelperDescriptionFactory;
 
         public RazorCompletionEndpoint(
             ForegroundDispatcher foregroundDispatcher,
             DocumentResolver documentResolver,
             RazorCompletionFactsService completionFactsService,
             TagHelperCompletionService tagHelperCompletionService,
+            TagHelperDescriptionFactory tagHelperDescriptionFactory,
             ILoggerFactory loggerFactory)
         {
             if (foregroundDispatcher == null)
@@ -53,6 +56,11 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                 throw new ArgumentNullException(nameof(tagHelperCompletionService));
             }
 
+            if (tagHelperDescriptionFactory == null)
+            {
+                throw new ArgumentNullException(nameof(tagHelperDescriptionFactory));
+            }
+
             if (loggerFactory == null)
             {
                 throw new ArgumentNullException(nameof(loggerFactory));
@@ -62,6 +70,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             _documentResolver = documentResolver;
             _completionFactsService = completionFactsService;
             _tagHelperCompletionService = tagHelperCompletionService;
+            _tagHelperDescriptionFactory = tagHelperDescriptionFactory;
             _logger = loggerFactory.CreateLogger<RazorCompletionEndpoint>();
         }
 
@@ -141,6 +150,46 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                 ResolveProvider = true,
                 TriggerCharacters = new Container<string>("@", "<"),
             };
+        }
+
+        public bool CanResolve(CompletionItem completionItem)
+        {
+            if (completionItem.IsTagHelperElementCompletion() ||
+                completionItem.IsTagHelperAttributeCompletion())
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        public Task<CompletionItem> Handle(CompletionItem completionItem, CancellationToken cancellationToken)
+        {
+            string markdown = null;
+            if (completionItem.IsTagHelperElementCompletion())
+            {
+                var descriptionInfo = completionItem.GetElementDescriptionInfo();
+                _tagHelperDescriptionFactory.TryCreateDescription(descriptionInfo, out markdown);
+            }
+
+            if (completionItem.IsTagHelperAttributeCompletion())
+            {
+                var descriptionInfo = completionItem.GetAttributeDescriptionInfo();
+                _tagHelperDescriptionFactory.TryCreateDescription(descriptionInfo, out markdown);
+            }
+
+            if (markdown != null)
+            {
+                var documentation = new StringOrMarkupContent(
+                    new MarkupContent()
+                    {
+                        Kind = MarkupKind.Markdown,
+                        Value = markdown,
+                    });
+                completionItem.Documentation = documentation;
+            }
+
+            return Task.FromResult(completionItem);
         }
     }
 }
