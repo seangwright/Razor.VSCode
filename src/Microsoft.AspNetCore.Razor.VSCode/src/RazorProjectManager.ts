@@ -170,6 +170,7 @@ export class RazorProjectManager {
                 configuration: projectHandle.Configuration,
                 rootNamespace: projectHandle.RootNamespace,
                 projectWorkspaceState: projectHandle.ProjectWorkspaceState,
+                documents: projectHandle.Documents,
                 lastUpdated,
             };
             return configuration;
